@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-azure-storage-blob
-pydantic
+minio
 python-dotenv
+pydantic
