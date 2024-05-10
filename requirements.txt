@@ -3,3 +3,8 @@ uvicorn
 minio
 python-dotenv
 pydantic
+openai
+pinecone-client
+PyPDF2
+pytesseract
+Pillow
