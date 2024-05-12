@@ -10,13 +10,12 @@ import openai
 import pinecone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from config import OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_ENV, OUTPUT_DIR
 import requests
 import io
 from PIL import Image
 import PyPDF2
 import json
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET_NAME
+from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR
 from minio import Minio
 #define the router
 router = APIRouter()
@@ -34,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Define request model
 class OCRRequest(BaseModel):
-    pre_signed_url: str
+    bucket_name: str = "my-bucket2"
+    object_name: str
 
 # Define response model
 class OCRResponse(BaseModel):
@@ -56,40 +56,52 @@ async def ocr_process(data: OCRRequest):
     Returns:
         JSON: Extracted OCR Information in JSON format
     """
-
     try:
-        # Fetch the file using the signed URL
-        response = requests.get(data.pre_signed_url)
-        print(response.status_code)
-        print(response.headers['Content-Type'])
-        print(data.pre_signed_url.endswith(".pdf"))
+        allowed_formats = [".pdf", ".tiff", ".png", ".jpeg"]
+
+        try:
+            # Fetch the file from MinIO using the bucket_name and object_name
+            # response = minio_client.get_object(data.bucket_name, data.object_name)
+            input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
+            print(input_filepath)
+            minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
+        except:
+            logger.error("Failed to fetch the file from the given bucket, check the file details again")
+            raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, check the file details again")
         
-        # Download the file
-        x = minio_client.fget_object(MINIO_BUCKET_NAME, "σ╗║τ»ëσƒ║µ║ûµ│òµû╜ΦíîΣ╗ñ.pdf", "σ╗║τ»ëσƒ║µ║ûµ│òµû╜ΦíîΣ╗ñ.txt")    
-        print(x.last_modified)
+        file_extension = os.path.splitext(data.object_name)[1].lower()
+        if file_extension not in allowed_formats:
+            error_msg = f"Unsupported file format: {file_extension}. Only PDF, TIFF, PNG, JPEG formats are allowed."
+            logger.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
 
-        # Determine the file type and process accordingly
-        if response.headers['Content-Type'] == 'application/pdf':
-            ocr_text = extract_text_from_pdf(response.content)
-        else:
-            image = Image.open(io.BytesIO(response.content))
-            ocr_text = pytesseract.image_to_string(image)
+        # Read the file for OCR processing
+        with open(input_filepath, "rb") as file:
+            file_bytes = file.read()
 
-        # Save the extracted text in a JSON file
-        filename = os.path.splitext(os.path.basename(data.pre_signed_url))[0] + ".json"
+            # Determine the file type and process accordingly
+            if file_extension == ".pdf":
+                ocr_text = extract_text_from_pdf(file_bytes)
+            else:
+                image = Image.open(io.BytesIO(file_bytes))
+                ocr_text = pytesseract.image_to_string(image)
+        
+        filename = os.path.splitext(data.object_name)[0] + ".json"
+        # Save the extracted text in a JSON file                
         save_ocr_result(filename, ocr_text, "succeeded")
 
-        logger.info(f"OCR processing completed for signed URL: {data.pre_signed_url}")
+        logger.info(f"OCR processing completed for object: {data.object_name}")
         return OCRResponse(message="OCR processing successful")
+
     except Exception as e:
         logger.error(f"Error processing OCR: {e}")
-        filename = os.path.splitext(os.path.basename(data.pre_signed_url))[0] + ".json"
+        filename = os.path.splitext(data.object_name)[0] + ".json"   
         save_ocr_result(filename, "", "failed")
-        raise HTTPException(status_code=500, detail="Error processing OCR")
+        raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
     
 
-def extract_text_from_pdf(pdf_bytes):
-    pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+def extract_text_from_pdf(pdf_file):
+    pdf_reader = PyPDF2.PdfReader(pdf_file)
     ocr_text = ""
     for page_num in range(len(pdf_reader.pages)):
         page = pdf_reader.pages[page_num]
@@ -99,5 +111,7 @@ def extract_text_from_pdf(pdf_bytes):
 def save_ocr_result(filename, ocr_text, status):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     file_path = os.path.join(OUTPUT_DIR, filename)
+    print("ocr result")
+    print(OUTPUT_DIR, filename, file_path)
     with open(file_path, "w") as f:
-        json.dump({"filename": filename, "status": status, "analyzeResult": {"content": ocr_text}}, f)
+        json.dump({"status": status, "analyzeResult": {"content": ocr_text}}, f)
