@@ -16,7 +16,8 @@ import io
 from PIL import Image
 import PyPDF2
 import json
-
+from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET_NAME
+from minio import Minio
 #define the router
 router = APIRouter()
 
@@ -39,6 +40,8 @@ class OCRRequest(BaseModel):
 class OCRResponse(BaseModel):
     message: str
 
+# Initialize Minio client
+minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=True)
 
 @router.post("/ocr", response_model=OCRResponse)
 async def ocr_process(data: OCRRequest):
@@ -53,11 +56,17 @@ async def ocr_process(data: OCRRequest):
     Returns:
         JSON: Extracted OCR Information in JSON format
     """
+
     try:
         # Fetch the file using the signed URL
         response = requests.get(data.pre_signed_url)
         print(response.status_code)
         print(response.headers['Content-Type'])
+        print(data.pre_signed_url.endswith(".pdf"))
+        
+        # Download the file
+        x = minio_client.fget_object(MINIO_BUCKET_NAME, "σ╗║τ»ëσƒ║µ║ûµ│òµû╜ΦíîΣ╗ñ.pdf", "σ╗║τ»ëσƒ║µ║ûµ│òµû╜ΦíîΣ╗ñ.txt")    
+        print(x.last_modified)
 
         # Determine the file type and process accordingly
         if response.headers['Content-Type'] == 'application/pdf':
