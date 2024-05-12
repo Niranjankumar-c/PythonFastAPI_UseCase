@@ -43,7 +43,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
 
         try:
             # Save file to Minio
-            minio_client.put_object(MINIO_BUCKET_NAME, file.filename, file.file, -1, part_size=10*1024*1024)
+            minio_client.put_object(MINIO_BUCKET_NAME, file.filename, file.file, -1, part_size=10*1024*1024, content_type=file.content_type)
             
             # Get signed URL for the uploaded file with default expiry (i.e. 7 days)
             presigned_url = minio_client.presigned_get_object(MINIO_BUCKET_NAME, file.filename)
