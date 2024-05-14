@@ -58,33 +58,25 @@ async def ocr_process(data: OCRRequest):
     """
     try:
         allowed_formats = [".pdf", ".tiff", ".png", ".jpeg"]
-
-        try:
-            # Fetch the file from MinIO using the bucket_name and object_name
-            # response = minio_client.get_object(data.bucket_name, data.object_name)
-            input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
-            print(input_filepath)
-            minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
-        except:
-            logger.error("Failed to fetch the file from the given bucket, check the file details again")
-            raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, check the file details again")
         
         file_extension = os.path.splitext(data.object_name)[1].lower()
         if file_extension not in allowed_formats:
             error_msg = f"Unsupported file format: {file_extension}. Only PDF, TIFF, PNG, JPEG formats are allowed."
             logger.error(error_msg)
             raise HTTPException(status_code=400, detail=error_msg)
-
-        # Read the file for OCR processing
-        with open(input_filepath, "rb") as file:
-            file_bytes = file.read()
-
-            # Determine the file type and process accordingly
-            if file_extension == ".pdf":
-                ocr_text = extract_text_from_pdf(file_bytes)
-            else:
-                image = Image.open(io.BytesIO(file_bytes))
-                ocr_text = pytesseract.image_to_string(image)
+        
+        try:
+            # Fetch the file from MinIO using the bucket_name and object_name
+            input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
+            minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
+        except:
+            logger.error("Failed to fetch the file from the given bucket, check the file details again")
+            raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, check the file details again")
+        
+        #implement the file related OCR processing
+        if file_extension == ".pdf":
+            #read the pdf file and extracting the data
+            ocr_text = extract_text_from_pdf(input_filepath)
         
         filename = os.path.splitext(data.object_name)[0] + ".json"
         # Save the extracted text in a JSON file                
@@ -101,17 +93,35 @@ async def ocr_process(data: OCRRequest):
     
 
 def extract_text_from_pdf(pdf_file):
+    """Function to extract information from pdf using PyPDF
+
+    Args:
+        pdf_file (string): location of the file
+
+    Returns:
+        text: extracted description of the pdf information
+    """
+    print(pdf_file)
     pdf_reader = PyPDF2.PdfReader(pdf_file)
     ocr_text = ""
     for page_num in range(len(pdf_reader.pages)):
         page = pdf_reader.pages[page_num]
         ocr_text += page.extract_text()
+        print(ocr_text)
     return ocr_text
 
 def save_ocr_result(filename, ocr_text, status):
+    """saves the extracted OCR information into a JSON File
+
+    Args:
+        filename (str): name of the output json file, similar to the input file name
+        ocr_text (str): extracted text from ocr
+        status (str): status of the ocr process ("succeeded" or "failed")
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     file_path = os.path.join(OUTPUT_DIR, filename)
-    print("ocr result")
-    print(OUTPUT_DIR, filename, file_path)
-    with open(file_path, "w") as f:
-        json.dump({"status": status, "analyzeResult": {"content": ocr_text}}, f)
+    
+    data = {"status": status, "analyzeResult": {"content": ocr_text}}
+    json_string = json.dumps(data, ensure_ascii=False, indent=2)
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(json_string)
