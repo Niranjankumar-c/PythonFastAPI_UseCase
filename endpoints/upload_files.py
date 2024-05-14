@@ -13,7 +13,7 @@ router = APIRouter()
 
 # Initialize Minio client
 minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=True)
-
+print(MINIO_ACCESS_KEY)
 # Create the bucket if it doesn't exist
 try:
     if not minio_client.bucket_exists(MINIO_BUCKET_NAME):
@@ -42,14 +42,21 @@ async def upload_files(files: List[UploadFile] = File(...)):
             raise HTTPException(status_code=400, detail=f"Invalid file type. Only {', '.join(allowed_types)} are allowed.")
 
         try:
+            # Generate unique file ID using uuid4
+            unique_file_id = generate_unique_file_id()
+
             # Save file to Minio
             minio_client.put_object(MINIO_BUCKET_NAME, file.filename, file.file, -1, part_size=10*1024*1024, content_type=file.content_type)
-            
-            # Get signed URL for the uploaded file with default expiry (i.e. 7 days)
-            presigned_url = minio_client.presigned_get_object(MINIO_BUCKET_NAME, file.filename)
 
-            # Generate unique file ID using uuid4
-            unique_file_id = uuid.uuid4().hex
+            try:
+                # Get signed URL for the uploaded file
+                presigned_url = generate_presigned_url(minio_client, MINIO_BUCKET_NAME, file.filename)
+            except S3Error as err:
+                logger.error(f"Error occurred while generating presigned URL for file: {err}")
+                raise HTTPException(status_code=500, detail=f"Error occurred generating presigned URL for file: {err}")
+            
+            # # Get signed URL for the uploaded file with default expiry (i.e. 7 days)
+            # presigned_url = minio_client.presigned_get_object(MINIO_BUCKET_NAME, file.filename)
 
             file_urls[unique_file_id] = presigned_url
             logger.info(f"File {file.filename} uploaded successfully")
@@ -58,3 +65,26 @@ async def upload_files(files: List[UploadFile] = File(...)):
             raise HTTPException(status_code=500, detail=f"Error uploading file: {err}")
 
     return FileUploadResponse(file_urls=file_urls)
+
+def generate_unique_file_id():
+    """Function to generate unique file id
+
+    Returns:
+        _type_: returns the hex code of the unique file identifier
+    """
+    return uuid.uuid4().hex
+
+
+def generate_presigned_url(minio_client, bucket_name, object_name):
+    """Seperate function to generate the pre-signed URL
+
+    Args:
+        minio_client: Minio client object
+        bucket_name: name of the bucket for the file upload
+        object_name: name of the object/file to upload
+
+    Returns:
+        URL: Returns the URL of the file upload with default expiry
+    """
+    # Get signed URL for the uploaded file with default expiry (7 days)
+    return minio_client.presigned_get_object(bucket_name, object_name)

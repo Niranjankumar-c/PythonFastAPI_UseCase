@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv() #load the .env variables
 
 #set the config parameters
 MINIO_ENDPOINT = "play.min.io:9000"
@@ -10,4 +13,4 @@ MINIO_BUCKET_NAME = "my-bucket2"
 OUTPUT_DIR = os.path.join(os.getcwd(), "ocr_results")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_EN")
+PINECONE_ENV = os.getenv("PINECONE_ENV")
