@@ -10,4 +10,4 @@ MINIO_BUCKET_NAME = "my-bucket2"
 OUTPUT_DIR = os.path.join(os.getcwd(), "ocr_results")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENV")
+PINECONE_ENV = os.getenv("PINECONE_EN")
