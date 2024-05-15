@@ -11,3 +11,5 @@ Pillow
 opencv-python
 tifffile
 langchain
+langchain-community
+tiktoken

@@ -3,21 +3,22 @@ ocr.py: The file used to implement the OCR endpoint
 
 """
 #import required packages
-import os
+import os, time
 import logging
-import pytesseract
-import openai
+import pytesseract, openai
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
-import pinecone
+from langchain_community.embeddings import OpenAIEmbeddings
+from pinecone import Pinecone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from PIL import Image
+from tqdm import tqdm
 import PyPDF2, tifffile
-import json
 from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR, EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY
 from minio import Minio
-import random, string, cv2
+import random, string, cv2, json
+
+# Configure OpenAI api
+openai.api_key = OPENAI_API_KEY
 
 # Initialize OpenAIEmbeddings
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL_ID)
@@ -29,11 +30,8 @@ router = APIRouter()
 logging.basicConfig(level=logging.INFO, filename='logs/ocr.log', format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
-# Configure OpenAI api
-openai.api_key = OPENAI_API_KEY
-
 # configure pinecone api
-pc = pinecone(api_key=PINECONE_API_KEY)
+pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # Define request model
 class OCRRequest(BaseModel):
@@ -109,19 +107,19 @@ async def ocr_process(data: OCRRequest):
         save_ocr_result(filename, "", "failed")
         raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
     
-@router.post("/embeddings", response_model=OCRResponse, include_in_schema=False)
+@router.post("/embeddings", response_model=OCRResponse, include_in_schema=True)
 def create_embeddings(data: OCRRequest):
 
     try:
         logger.info(f"Creating embeddings for object: {data.object_name}")
 
         #read the json from the ocr function 
-        input_filepath = os.path.join(OUTPUT_DIR, data.object_name + ".json")
+        input_filepath = os.path.join(OUTPUT_DIR, data.object_name.split('.')[0] + ".json")
 
         logger.info(f"Reading extracted text from the json file: {input_filepath}")
-        with open(input_filepath, "r") as file:
+        with open(input_filepath, "r", encoding="utf8") as file:
             ocr_data = json.load(file)
-
+        
         if ocr_data["status"] == "succeeded":
             ocr_text = ocr_data["analyzeResult"]["content"]
             
@@ -133,12 +131,13 @@ def create_embeddings(data: OCRRequest):
                 logger.info("Creating embeddings for the OCR text using OpenAI")
                 embedding = get_embedding(chunks)
 
-                logger.info("Uploading embeddings to Pinecone")
-                namespace = f"{data.object_name.split('.')[0]}_{generate_unique_number()}"
-                upload_embeddings_to_pinecone(embedding, namespace)
-                
-                logger.info(f"Embeddings processing completed for object: {data.object_name}")
-                return OCRResponse(message=f"Embeddings processing successful. Namespace: {namespace}")
+                if embedding:
+                    logger.info("Uploading embeddings to Pinecone")
+                    namespace = f"{data.object_name.split('.')[0]}_{generate_unique_number()}"
+                    upload_embeddings_to_pinecone(embedding, namespace)
+                    
+                    logger.info(f"Embeddings processing completed for object: {data.object_name}")
+                    return OCRResponse(message=f"Embeddings processing successful. Namespace: {namespace}")
             else:
                 error_msg = f"Error splitting text into chunks for object: {data.object_name}"
                 logger.error(error_msg)
@@ -153,7 +152,7 @@ def create_embeddings(data: OCRRequest):
         raise HTTPException(status_code=500, detail=f"Error processing embeddings: {e}")
     
 # OCR-Embeddings function
-@router.post("/ocr-embeddings", response_model=OCRResponse)
+@router.post("/ocr-embeddings", response_model=OCRResponse, include_in_schema=False)
 def ocr_embeddings_process(data: OCRRequest):
     try:
         ocr_response = ocr_process(data)
@@ -163,7 +162,7 @@ def ocr_embeddings_process(data: OCRRequest):
         raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
 
     try:
-        embeddings_response = embeddings_process(data)
+        # embeddings_response = embeddings_process(data)
         logger.info(f"Embedding processing completed for object: {data.object_name}")
     except Exception as e:
         logger.error(f"Error processing embeddings: {e}")
@@ -252,19 +251,34 @@ def get_embedding(text_to_embed):
     Returns:
         list: list of embeddings for the data
     """
+
     try:
 
-        # Create a list to store the embeddings
-        all_embeddings = []
+        max_retries = 5
+        base_delay = 2  # Initial delay in seconds
 
-        # Process each chunk
-        for chunk in text_to_embed:
-            # Embed the chunk using OpenAIEmbeddings
-            chunk_embeddings = embeddings.embed_documents([chunk])
-            # add all the embeddings to the list
-            all_embeddings.extend(chunk_embeddings)
+        for attempt in range(max_retries):
 
-        return all_embeddings
+            try:
+                # Create a list to store the embeddings
+                all_embeddings = []
+
+                # Process each chunk
+                for chunk in tqdm(text_to_embed):
+                    # Embed the chunk using OpenAIEmbeddings
+                    chunk_embeddings = embeddings.embed_documents([chunk])
+                    # add all the embeddings to the list
+                    all_embeddings.extend(chunk_embeddings)
+                    #add a small time delay
+                    time.sleep(2)
+
+                return all_embeddings
+            except OpenAIEmbeddings.RateLimitError as e:
+                if attempt == max_retries - 1:
+                    raise e
+                delay = base_delay * (2 ** attempt)
+                print(f"Rate limit reached. Retrying in {delay} seconds...")
+                time.sleep(delay)
 
     except Exception as e:
         logger.error(f"Error while creating embeddings: {e}")
@@ -289,7 +303,7 @@ def split_text_into_chunks(text):
             chunk_overlap=300,
             length_function = len)
 
-        chunks = splitter.split(text)
+        chunks = splitter.split_text(text)
         return chunks
     except Exception as e:
         logger.error(f"Error while splitting text into multiple chunks: {e}")
@@ -306,8 +320,17 @@ def upload_embeddings_to_pinecone(embeddings, namespace):
         HTTPException: Upload error when failed to upload
     """
     try:
-        index_name = "FASTAPI_usecase"
-        index = pc.Index(name=index_name, namespace=namespace)
+        index_name = "FASTAPI_usecase" #name of the index - pinecone
+
+        #check if the index is present in the pinecone db else will create the index
+        try:
+            index = pc.Index(name=index_name, namespace=namespace)
+        except pc.errors.IndexNotFound:
+            logger.info(f"Index '{index_name}' not found. Creating a new index...")
+            index = pc.Index.create(name=index_name, namespace=namespace, dimension=len(embeddings[0]))
+            logger.info(f"Index '{index_name}' created successfully.")
+        
+        #
         index.upsert(vectors=[{"id": str(i), "values": embedding} for i, embedding in enumerate(embeddings)])
     except Exception as e:
         logger.error(f"Error uploading embeddings to Pinecone: {e}")
