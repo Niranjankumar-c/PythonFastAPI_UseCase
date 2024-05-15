@@ -10,3 +10,4 @@ pytesseract
 Pillow
 opencv-python
 tifffile
+langchain
