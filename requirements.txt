@@ -8,3 +8,5 @@ pinecone-client
 PyPDF2
 pytesseract
 Pillow
+opencv-python
+tifffile
