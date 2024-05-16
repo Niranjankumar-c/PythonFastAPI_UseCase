@@ -330,7 +330,7 @@ def upload_embeddings_to_pinecone(embeddings, namespace):
             index = pc.Index.create(name=index_name, namespace=namespace, dimension=len(embeddings[0]))
             logger.info(f"Index '{index_name}' created successfully.")
         
-        #
+        #upload the embeddings into the database
         index.upsert(vectors=[{"id": str(i), "values": embedding} for i, embedding in enumerate(embeddings)])
     except Exception as e:
         logger.error(f"Error uploading embeddings to Pinecone: {e}")
