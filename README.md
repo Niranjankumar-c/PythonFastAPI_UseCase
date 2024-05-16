@@ -71,6 +71,33 @@ OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
    uvicorn main:app --host 0.0.0.0 --port 8000
    ```
 2. Access the API at `http://localhost:8000`
- 
 
+## EndPoints
 
+### File Upload Endpoint
+Path: **`/upload`**<br />
+Method: **POST**<br />
+Functionality:
+- Accepts one or more file uploads (limited to pdf, tiff, png,jpeg formats).
+
+### MOCK OCR Service EndPoint
+Path: **`/ocr`**(In-Progress)<br />
+Method: **POST**<br />
+Functionality:
+- Simulating the operation of an OCR service on a file and generating embeddings for uploading to a vector database.
+
+### Attribute Extraction Endpoint
+Path: **`/extract`**(Yet to Implement)<br />
+Method: **POST**<br />
+Functionality:
+- Takes a query text and file_id as input, performs a vector search and returns matching attributes based on the embeddings.
+
+## Testing the Application Functionality
+Start the FastAPI server by running the main.py<br />
+### Postman or CURL
+- Use tools like Postman or curl to send a POST request to `http://localhost:8000/upload` with one or more files in the request body.
+  - For example, using curl with a file named "test_file.pdf": `curl -X POST http://localhost:8000/upload -F "files=@test_file.pdf"`
+  - The response should be a JSON object containing a list of uploaded file IDs if successful.
+### Interactive FASTAPI Docs
+- After starting the server go to `http://127.0.0.1:8000/docs`, You will see the automatic interactive API documentation provided by Swagger UI.
+![image](https://github.com/Niranjankumar-c/PythonFastAPI_UseCase/assets/36450263/31a6b5db-9ec8-4e8e-8b26-cc1ee9ba24b3)
