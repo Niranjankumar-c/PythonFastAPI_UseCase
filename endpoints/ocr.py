@@ -15,7 +15,7 @@ from tqdm import tqdm
 import PyPDF2, tifffile
 from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR, EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY
 from minio import Minio
-import cv2, json, uuid, minio
+import cv2, json, uuid
 
 # Configure OpenAI api
 openai.api_key = OPENAI_API_KEY
@@ -45,8 +45,8 @@ class OCRResponse(BaseModel):
 # Initialize Minio client
 minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=True)
 
-@router.post("/ocr-extraction", response_model=OCRResponse, include_in_schema=True)
-async def ocr_process(data: OCRRequest):
+@router.post("/ocr-extraction", include_in_schema=False)
+def ocr_process(data: OCRRequest):
     """Function to perform OCR operation on the input data
 
     Args:
@@ -60,26 +60,17 @@ async def ocr_process(data: OCRRequest):
     """
     try:
         allowed_formats = [".pdf", ".tiff", ".png", ".jpeg"]
-        logger.info(f"Analyzing OCR process request for object: {data.object_name}")
+        logger.info(f"Initializing OCR process request for object: {data.object_name}")
         
         file_extension = os.path.splitext(data.object_name)[1].lower()
+        logger.info("Checking if the input file format is valid")
         if file_extension not in allowed_formats:
-            logger.info("Checking if the input file format is valid")
             error_msg = f"Unsupported file format: {file_extension}. Only PDF, TIFF, PNG, JPEG formats are allowed."
             logger.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
-        
-        # try:
-        #     # Fetch the file from MinIO using the bucket_name and object_name
-        #     logger.info("Fetching the file from MinIO using bucket name and object name")
-        #     input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
-        #     minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
-        # except:
-        #     logger.error("Failed to fetch the file from the given bucket, check the file details again")
-        #     raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, check the file details again")
+            raise ValueError(error_msg)
         
         logger.info("Fetching the file from MinIO using bucket name and object name")
-        input_filepath = await download_file_from_minio(data)
+        input_filepath = download_file_from_minio(data)
         
         #implement the file related OCR processing
         logger.info("Extracting text information from the file using OCR")
@@ -110,9 +101,9 @@ async def ocr_process(data: OCRRequest):
         filename = os.path.splitext(data.object_name)[0] + ".json"   
         save_ocr_result(filename, "", "failed")
         logger.error(f"Error processing OCR: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
+        raise Exception(f"Error processing OCR: {e}")
     
-@router.post("/embeddings", response_model=OCRResponse, include_in_schema=False)
+@router.post("/embeddings", include_in_schema=False)
 def create_embeddings(data: OCRRequest):
 
     try:
@@ -145,36 +136,34 @@ def create_embeddings(data: OCRRequest):
                     logger.info(f"Embeddings processing completed for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}" )
                     return OCRResponse(message=f"Embeddings processing successful for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}")
             else:
-                error_msg = f"Error splitting text into chunks for object: {data.object_name}"
-                logger.error(error_msg)
-                raise HTTPException(status_code=400, detail=error_msg)
+                logger.warning(f"No chunks generated for object: {data.object_name}. Skipping embeddings creation.")
+                return OCRResponse(message=f"No chunks generated for object: {data.object_name}. Skipping embeddings creation.")
         else:
-            error_msg = f"OCR extraction status for the file : {data.object_name} has failed, try embeddings creation with valid file"
-            logger.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
+            logger.warning(f"OCR extraction status for the file: {data.object_name} is {ocr_data['status']}. Skipping embeddings creation.")
+            return OCRResponse(message=f"OCR extraction status for the file: {data.object_name} is '{ocr_data['status']}'. Skipping embeddings creation.")
 
     except Exception as e:
         logger.error(f"Error processing embeddings: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing embeddings: {e}")
+        raise Exception(f"Error processing embeddings: {e}")
     
 # OCR-Embeddings function
 @router.post("/ocr", response_model=OCRResponse, include_in_schema=True)
 def ocr_embeddings_process(data: OCRRequest):
+
     try:
         ocr_response = ocr_process(data)
-        logger.info(f"OCR processing completed for object: {data.object_name}")
+        print(ocr_response)
     except Exception as e:
         logger.error(f"Error processing OCR: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
 
     try:
-        # embeddings_response = embeddings_process(data)
-        logger.info(f"Embedding processing completed for object: {data.object_name}")
+        embeddings_response = create_embeddings(data)
     except Exception as e:
         logger.error(f"Error processing embeddings: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing embeddings: {e}")
-
-    return OCRResponse(message="OCR and Embeddings processing successful")
+    
+    return OCRResponse(message=embeddings_response.message)
     
 def extract_text_from_pdf(pdf_file):
     """Function to extract information from pdf using PyPDF
@@ -282,13 +271,14 @@ def get_embedding(text_to_embed):
                     time.sleep(2)
 
                 return all_embeddings
-            except OpenAIEmbeddings.RateLimitError as rate_error:
-                if attempt == max_retries - 1:
-                    logger.error("Rate limit error: {rate_error}")
-                    raise rate_error
-                delay = base_delay * (2 ** attempt)
-                print(f"Rate limit reached. Retrying in {delay} seconds...")
-                time.sleep(delay)
+            except Exception as rate_error:
+                if isinstance(rate_error, openai.RateLimitError):
+                    if attempt == max_retries - 1:
+                        logger.error(f"Rate limit exhausted after {max_retries} retries: {rate_error}")
+                        raise rate_error
+                    delay = base_delay * (2 ** attempt)
+                    print(f"Rate limit reached. Retrying in {delay} seconds...")
+                    time.sleep(delay)
 
     except Exception as e:
         logger.error(f"Error while creating embeddings: {e}")
@@ -365,7 +355,7 @@ def upload_embeddings_to_pinecone(embeddings, data_filename):
             logger.info(f"Pinecone: Wait for the index to be initialized")
             time.sleep(2) 
 
-        logger.info(f"Index stats:  {index.describe_index_stats()}")
+        # logger.info(f"Index stats:  {index.describe_index_stats()}")
         logger.info(f"Embeddings uploaded successfully for object: {data_filename}")
         return {"object_name": data_filename, "namespace": namespace, "success": True}
     except Exception as upload_error:
@@ -376,11 +366,11 @@ def generate_unique_file_id():
     """Function to generate unique file id
 
     Returns:
-        _type_: returns the hex code of the unique file identifier
+        string: returns the hex code of the unique file identifier
     """
     return uuid.uuid4().hex
 
-async def download_file_from_minio(data: OCRRequest):
+def download_file_from_minio(data: OCRRequest):
     """Downloads a file from Minio based on the given bucket and file name
 
     Args:
@@ -403,7 +393,6 @@ async def download_file_from_minio(data: OCRRequest):
         # Check if the object exists
         try:
             stat = minio_client.stat_object(data.bucket_name, data.object_name)
-            print(stat)
         except Exception as e:
             logger.error(f"Object '{data.object_name}' does not exist in bucket '{data.bucket_name}'")
             raise HTTPException(status_code=404, detail=f"Object '{data.object_name}' does not exist in bucket '{data.bucket_name}'")
@@ -413,6 +402,7 @@ async def download_file_from_minio(data: OCRRequest):
             logger.info("Fetching the file from MinIO using bucket name and object name")
             input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
             minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
+            time.sleep(1) #time for file download
         except:
             logger.error("Error while fetching the object from the Minio bucket, please try again")
             raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, please try again")
