@@ -13,7 +13,7 @@ router = APIRouter()
 
 # Initialize Minio client
 minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=True)
-print(MINIO_ACCESS_KEY)
+
 # Create the bucket if it doesn't exist
 try:
     if not minio_client.bucket_exists(MINIO_BUCKET_NAME):

@@ -2,6 +2,7 @@
 from fastapi import FastAPI
 from endpoints import upload_files
 from endpoints import ocr
+from endpoints import extraction
 
 #Create FASTAPI instance
 app = FastAPI()
@@ -9,7 +10,7 @@ app = FastAPI()
 #call the include router function
 app.include_router(upload_files.router)
 app.include_router(ocr.router)
-
+app.include_router(extraction.router)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000)

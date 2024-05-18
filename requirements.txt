@@ -10,6 +10,8 @@ pytesseract
 Pillow
 opencv-python
 tifffile
+langchain-openai
 langchain
 langchain-community
 tiktoken
+langchain-pinecone

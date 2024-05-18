@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from tqdm import tqdm
 import PyPDF2, tifffile
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR, EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY
+from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR, EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX
 from minio import Minio
 import cv2, json, uuid
 
@@ -30,7 +30,7 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 router = APIRouter()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, filename='logs/ocr.log', format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Define request model
@@ -320,7 +320,7 @@ def upload_embeddings_to_pinecone(embeddings, data_filename):
         HTTPException: Upload error when failed to upload
     """
     try:
-        index_name = "fastapi-usecase" #name of the index - pinecone
+        index_name = PINECONE_INDEX #name of the index - pinecone
         dimension_length = len(embeddings[0])  #get the dimensions to create the index
         namespace = generate_unique_file_id()
         

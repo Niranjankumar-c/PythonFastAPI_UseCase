@@ -14,8 +14,9 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "ocr_results")
 
 #pinecone parameters
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENV")
+PINECONE_INDEX = os.getenv("PINECONE_INDEX")
 
 #openai parameters
 EMBEDDING_MODEL_ID = os.getenv("OPENAI_EMBEDDING_MODEL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL_ID = os.getenv("OPENAI_CHAT_MODEL")
