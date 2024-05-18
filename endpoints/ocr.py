@@ -8,14 +8,14 @@ import logging
 import pytesseract, openai
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import OpenAIEmbeddings
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from tqdm import tqdm
 import PyPDF2, tifffile
 from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR, EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY
 from minio import Minio
-import random, string, cv2, json
+import cv2, json, uuid
 
 # Configure OpenAI api
 openai.api_key = OPENAI_API_KEY
@@ -23,15 +23,15 @@ openai.api_key = OPENAI_API_KEY
 # Initialize OpenAIEmbeddings
 embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL_ID)
 
+# configure pinecone api
+pc = Pinecone(api_key=PINECONE_API_KEY)
+
 #define the router
 router = APIRouter()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, filename='logs/ocr.log', format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
-
-# configure pinecone api
-pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # Define request model
 class OCRRequest(BaseModel):
@@ -45,8 +45,8 @@ class OCRResponse(BaseModel):
 # Initialize Minio client
 minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=True)
 
-@router.post("/ocr", response_model=OCRResponse, include_in_schema=False)
-async def ocr_process(data: OCRRequest):
+@router.post("/ocr-extraction", include_in_schema=False)
+def ocr_process(data: OCRRequest):
     """Function to perform OCR operation on the input data
 
     Args:
@@ -60,23 +60,17 @@ async def ocr_process(data: OCRRequest):
     """
     try:
         allowed_formats = [".pdf", ".tiff", ".png", ".jpeg"]
-        logger.info(f"Analyzing OCR process request for object: {data.object_name}")
+        logger.info(f"Initializing OCR process request for object: {data.object_name}")
         
         file_extension = os.path.splitext(data.object_name)[1].lower()
+        logger.info("Checking if the input file format is valid")
         if file_extension not in allowed_formats:
-            logger.info("Checking if the input file format is valid")
             error_msg = f"Unsupported file format: {file_extension}. Only PDF, TIFF, PNG, JPEG formats are allowed."
             logger.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
+            raise ValueError(error_msg)
         
-        try:
-            # Fetch the file from MinIO using the bucket_name and object_name
-            logger.info("Fetching the file from MinIO using bucket name and object name")
-            input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
-            minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
-        except:
-            logger.error("Failed to fetch the file from the given bucket, check the file details again")
-            raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, check the file details again")
+        logger.info("Fetching the file from MinIO using bucket name and object name")
+        input_filepath = download_file_from_minio(data)
         
         #implement the file related OCR processing
         logger.info("Extracting text information from the file using OCR")
@@ -91,23 +85,25 @@ async def ocr_process(data: OCRRequest):
         filename = os.path.splitext(data.object_name)[0] + ".json"
 
         # Check if the OCR text is empty or None
-        # Save the extracted text in a JSON file  
-        logger.info("Saving the OCR extracted information to a JSON file")
+        # Save the extracted text in a JSON file 
         if ocr_text:
+            filename = os.path.splitext(data.object_name)[0] + ".json"
             save_ocr_result(filename, ocr_text, "succeeded")
+            logger.info(f"OCR processing completed for object: {data.object_name}")
+            return OCRResponse(message="OCR processing successful")
         else:
+            filename = os.path.splitext(data.object_name)[0] + ".json"
             save_ocr_result(filename, "", "failed")
-
-        logger.info(f"OCR processing completed for object: {data.object_name}")
-        return OCRResponse(message="OCR processing successful")
+            logger.error(f"OCR processing failed for object: {data.object_name}")
+            return OCRResponse(message="OCR processing failed")
 
     except Exception as e:
-        logger.error(f"Error processing OCR: {e}")
         filename = os.path.splitext(data.object_name)[0] + ".json"   
         save_ocr_result(filename, "", "failed")
-        raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
+        logger.error(f"Error processing OCR: {e}")
+        raise Exception(f"Error processing OCR: {e}")
     
-@router.post("/embeddings", response_model=OCRResponse, include_in_schema=True)
+@router.post("/embeddings", include_in_schema=False)
 def create_embeddings(data: OCRRequest):
 
     try:
@@ -133,42 +129,41 @@ def create_embeddings(data: OCRRequest):
 
                 if embedding:
                     logger.info("Uploading embeddings to Pinecone")
-                    namespace = f"{data.object_name.split('.')[0]}_{generate_unique_number()}"
-                    upload_embeddings_to_pinecone(embedding, namespace)
                     
-                    logger.info(f"Embeddings processing completed for object: {data.object_name}")
-                    return OCRResponse(message=f"Embeddings processing successful. Namespace: {namespace}")
+                    #upload embeddings to the pinecone vectordatabase
+                    embeddings_result = upload_embeddings_to_pinecone(embedding, data.object_name)
+                    
+                    logger.info(f"Embeddings processing completed for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}" )
+                    return OCRResponse(message=f"Embeddings processing successful for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}")
             else:
-                error_msg = f"Error splitting text into chunks for object: {data.object_name}"
-                logger.error(error_msg)
-                raise HTTPException(status_code=400, detail=error_msg)
+                logger.warning(f"No chunks generated for object: {data.object_name}. Skipping embeddings creation.")
+                return OCRResponse(message=f"No chunks generated for object: {data.object_name}. Skipping embeddings creation.")
         else:
-            error_msg = f"OCR extraction status for the file : {data.object_name} has failed, try embeddings creation with valid file"
-            logger.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
+            logger.warning(f"OCR extraction status for the file: {data.object_name} is {ocr_data['status']}. Skipping embeddings creation.")
+            return OCRResponse(message=f"OCR extraction status for the file: {data.object_name} is '{ocr_data['status']}'. Skipping embeddings creation.")
 
     except Exception as e:
         logger.error(f"Error processing embeddings: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing embeddings: {e}")
+        raise Exception(f"Error processing embeddings: {e}")
     
 # OCR-Embeddings function
-@router.post("/ocr-embeddings", response_model=OCRResponse, include_in_schema=False)
+@router.post("/ocr", response_model=OCRResponse, include_in_schema=True)
 def ocr_embeddings_process(data: OCRRequest):
+
     try:
         ocr_response = ocr_process(data)
-        logger.info(f"OCR processing completed for object: {data.object_name}")
+        print(ocr_response)
     except Exception as e:
         logger.error(f"Error processing OCR: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
 
     try:
-        # embeddings_response = embeddings_process(data)
-        logger.info(f"Embedding processing completed for object: {data.object_name}")
+        embeddings_response = create_embeddings(data)
     except Exception as e:
         logger.error(f"Error processing embeddings: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing embeddings: {e}")
-
-    return OCRResponse(message="OCR and Embeddings processing successful")
+    
+    return OCRResponse(message=embeddings_response.message)
     
 def extract_text_from_pdf(pdf_file):
     """Function to extract information from pdf using PyPDF
@@ -185,7 +180,6 @@ def extract_text_from_pdf(pdf_file):
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
             ocr_text += page.extract_text()
-            print(ocr_text)
         return ocr_text
     except Exception as e:
         logger.error(f"Error extracting text from PDF: {e}")
@@ -233,9 +227,13 @@ def save_ocr_result(filename, ocr_text, status):
         ocr_text (str): extracted text from ocr
         status (str): status of the ocr process ("succeeded" or "failed")
     """
+    if not ocr_text:  # Check if OCR text is empty
+        logger.warning("OCR text is empty. Skipping saving OCR result.")
+        return
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     file_path = os.path.join(OUTPUT_DIR, filename)
-    logger.info(f"Saving OCR result to json file: {file_path}")
+    logger.info(f"Saving OCR result to JSON file: {file_path}")
     data = {"status": status, "analyzeResult": {"content": ocr_text}}
     json_string = json.dumps(data, ensure_ascii=False, indent=2)
     with open(file_path, "w", encoding="utf-8") as f:
@@ -273,12 +271,14 @@ def get_embedding(text_to_embed):
                     time.sleep(2)
 
                 return all_embeddings
-            except OpenAIEmbeddings.RateLimitError as e:
-                if attempt == max_retries - 1:
-                    raise e
-                delay = base_delay * (2 ** attempt)
-                print(f"Rate limit reached. Retrying in {delay} seconds...")
-                time.sleep(delay)
+            except Exception as rate_error:
+                if isinstance(rate_error, openai.RateLimitError):
+                    if attempt == max_retries - 1:
+                        logger.error(f"Rate limit exhausted after {max_retries} retries: {rate_error}")
+                        raise rate_error
+                    delay = base_delay * (2 ** attempt)
+                    print(f"Rate limit reached. Retrying in {delay} seconds...")
+                    time.sleep(delay)
 
     except Exception as e:
         logger.error(f"Error while creating embeddings: {e}")
@@ -309,7 +309,7 @@ def split_text_into_chunks(text):
         logger.error(f"Error while splitting text into multiple chunks: {e}")
         return None
     
-def upload_embeddings_to_pinecone(embeddings, namespace):
+def upload_embeddings_to_pinecone(embeddings, data_filename):
     """upload embeddings to the pinecone vector database
 
     Args:
@@ -320,21 +320,99 @@ def upload_embeddings_to_pinecone(embeddings, namespace):
         HTTPException: Upload error when failed to upload
     """
     try:
-        index_name = "FASTAPI_usecase" #name of the index - pinecone
-
-        #check if the index is present in the pinecone db else will create the index
-        try:
-            index = pc.Index(name=index_name, namespace=namespace)
-        except pc.errors.IndexNotFound:
-            logger.info(f"Index '{index_name}' not found. Creating a new index...")
-            index = pc.Index.create(name=index_name, namespace=namespace, dimension=len(embeddings[0]))
-            logger.info(f"Index '{index_name}' created successfully.")
+        index_name = "fastapi-usecase" #name of the index - pinecone
+        dimension_length = len(embeddings[0])  #get the dimensions to create the index
+        namespace = generate_unique_file_id()
         
-        #upload the embeddings into the database
-        index.upsert(vectors=[{"id": str(i), "values": embedding} for i, embedding in enumerate(embeddings)])
+        try:
+            #check if the index is present in the pinecone db else will create the index
+            logger.info(f"Fetching the Index '{index_name}' in the pinecone db.")
+            if index_name not in pc.list_indexes().names():
+                logger.info(f"Index '{index_name}' not found. Creating a new index...")
+                pc.create_index(
+                name=index_name,
+                dimension=dimension_length,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud='aws', 
+                    region='us-east-1'
+                ) 
+            )
+                logger.info(f"Index '{index_name}' created successfully.") 
+        except Exception as index_error:
+            logger.error(f"Error creating {index_name} in pinecone with dimensions: {dimension_length}: {index_error}")
+            raise index_error
+        
+        
+        # Get the index
+        index = pc.Index(index_name)
+
+        # Upload embeddings to the index
+        index.upsert(vectors=[{"id": str(i), "values": embedding} for i, embedding in enumerate(embeddings)], namespace=namespace)
+
+        # wait for index to be initialized  
+        while not pc.describe_index(index_name).status['ready']:  
+            logger.info(f"Pinecone: Wait for the index to be initialized")
+            time.sleep(2) 
+
+        # logger.info(f"Index stats:  {index.describe_index_stats()}")
+        logger.info(f"Embeddings uploaded successfully for object: {data_filename}")
+        return {"object_name": data_filename, "namespace": namespace, "success": True}
+    except Exception as upload_error:
+        logger.error(f"Error uploading embeddings to Pinecone: {upload_error}")
+        raise upload_error
+
+def generate_unique_file_id():
+    """Function to generate unique file id
+
+    Returns:
+        string: returns the hex code of the unique file identifier
+    """
+    return uuid.uuid4().hex
+
+def download_file_from_minio(data: OCRRequest):
+    """Downloads a file from Minio based on the given bucket and file name
+
+    Args:
+        data (OCRRequest): OCRRequest object containing bucket and file name
+
+    Raises:
+        HTTPException: If the bucket or object does not exist or if the downloaded file is empty
+
+    Returns:
+        str: filepath of download file
+    """
+    try:
+        # Check if the bucket exists
+        if not minio_client.bucket_exists(data.bucket_name):
+            logger.error(f"Bucket '{data.bucket_name}' does not exist")
+            raise HTTPException(status_code=404, detail=f"Bucket '{data.bucket_name}' does not exist")
+        else:
+            logger.info(f"Bucket '{data.bucket_name}' exist")
+        
+        # Check if the object exists
+        try:
+            stat = minio_client.stat_object(data.bucket_name, data.object_name)
+        except Exception as e:
+            logger.error(f"Object '{data.object_name}' does not exist in bucket '{data.bucket_name}'")
+            raise HTTPException(status_code=404, detail=f"Object '{data.object_name}' does not exist in bucket '{data.bucket_name}'")
+            
+        try:
+            # Fetch the file from MinIO using the bucket_name and object_name
+            logger.info("Fetching the file from MinIO using bucket name and object name")
+            input_filepath = os.path.join(OUTPUT_DIR, data.object_name)
+            minio_client.fget_object(data.bucket_name, data.object_name, input_filepath)
+            time.sleep(1) #time for file download
+        except:
+            logger.error("Error while fetching the object from the Minio bucket, please try again")
+            raise HTTPException(status_code=400, detail="Failed to fetch the file from the given bucket, please try again")
+        
+        # Check if the downloaded file is valid
+        if os.path.getsize(input_filepath) == 0:
+            logger.error(f"Downloaded file '{data.object_name}' is empty")
+            raise HTTPException(status_code=400, detail=f"Downloaded file '{data.object_name}' is empty")
+        
+        return input_filepath
     except Exception as e:
-        logger.error(f"Error uploading embeddings to Pinecone: {e}")
-        raise HTTPException(status_code=500, detail="Error uploading embeddings to Pinecone")
-    
-def generate_unique_number():
-    return ''.join(random.choices(string.digits, k=5))
+        logger.error(f"Failed to fetch the file from the given bucket: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch the file from the given bucket: {e}")
