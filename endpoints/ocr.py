@@ -7,7 +7,7 @@ import os, time
 import logging
 import pytesseract, openai
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from pinecone import Pinecone, ServerlessSpec
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -16,12 +16,14 @@ import PyPDF2, tifffile
 from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OUTPUT_DIR, EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX
 from minio import Minio
 import cv2, json, uuid
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+import numpy as np
 
 # Configure OpenAI api
 openai.api_key = OPENAI_API_KEY
 
 # Initialize OpenAIEmbeddings
-embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL_ID)
+embedding_model = OpenAIEmbeddings(model=EMBEDDING_MODEL_ID)
 
 # configure pinecone api
 pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -124,17 +126,12 @@ def create_embeddings(data: OCRRequest):
             chunks = split_text_into_chunks(ocr_text)
             
             if chunks:
-                logger.info("Creating embeddings for the OCR text using OpenAI")
-                embedding = get_embedding(chunks)
-
-                if embedding:
-                    logger.info("Uploading embeddings to Pinecone")
+                # logger.info("Creating embeddings for the OCR text using OpenAI")
+                logger.info("Creating embeddings using OpenAI and uploading them to pinecone database")
+                embeddings_result = upload_embeddings_to_pinecone(chunks, data.object_name)
                     
-                    #upload embeddings to the pinecone vectordatabase
-                    embeddings_result = upload_embeddings_to_pinecone(embedding, data.object_name)
-                    
-                    logger.info(f"Embeddings processing completed for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}" )
-                    return OCRResponse(message=f"Embeddings processing successful for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}")
+                logger.info(f"Embeddings processing completed for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}" )
+                return OCRResponse(message=f"Embeddings processing successful for object: {data.object_name} and stored in namespace: {embeddings_result['namespace']}")
             else:
                 logger.warning(f"No chunks generated for object: {data.object_name}. Skipping embeddings creation.")
                 return OCRResponse(message=f"No chunks generated for object: {data.object_name}. Skipping embeddings creation.")
@@ -143,8 +140,8 @@ def create_embeddings(data: OCRRequest):
             return OCRResponse(message=f"OCR extraction status for the file: {data.object_name} is '{ocr_data['status']}'. Skipping embeddings creation.")
 
     except Exception as e:
-        logger.error(f"Error processing embeddings: {e}")
-        raise Exception(f"Error processing embeddings: {e}")
+        logger.error(f"Error occurred while creating and uploading embeddings: {e}")
+        raise Exception(f"Error occurred while creating and uploading embeddings: {e}")
     
 # OCR-Embeddings function
 @router.post("/ocr", response_model=OCRResponse, include_in_schema=True)
@@ -154,14 +151,12 @@ def ocr_embeddings_process(data: OCRRequest):
         ocr_response = ocr_process(data)
         print(ocr_response)
     except Exception as e:
-        logger.error(f"Error processing OCR: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing OCR: {e}")
+        raise HTTPException(status_code=500, detail=f"{e}")
 
     try:
         embeddings_response = create_embeddings(data)
     except Exception as e:
-        logger.error(f"Error processing embeddings: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing embeddings: {e}")
+        raise HTTPException(status_code=500, detail=f"{e}")
     
     return OCRResponse(message=embeddings_response.message)
     
@@ -240,50 +235,41 @@ def save_ocr_result(filename, ocr_text, status):
         f.write(json_string)
     logger.info("OCR result saved to file")
 
-def get_embedding(text_to_embed):
-    """Create embeddings from the chunks of the text
+@retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(5))
+def get_embeddings_from_openai(text_to_embed: list[str]):
+    """
+    Generate embeddings for a list of texts/chunks using openai
 
     Args:
-        text_to_embed (list): list of chunks
+        text_to_embed (list): A list of texts to be embedded.
 
     Returns:
-        list: list of embeddings for the data
+        list: A list of embeddings generated for the input texts.
     """
-
     try:
+        all_embeddings = []  # List to store all embeddings
+        
+        logger.info(f"Generating embeddings for {len(text_to_embed)} texts using model '{EMBEDDING_MODEL_ID}'...")
+        
+        # Process each text chunk
+        for index, text in enumerate(text_to_embed, start=1):
+            logger.info(f"Processing text {index}/{len(text_to_embed)} to create embeddings...")
 
-        max_retries = 5
-        base_delay = 2  # Initial delay in seconds
+            # Embed the chunk using OpenAIEmbeddings
+            chunk_embeddings = embedding_model.embed_documents([text])
 
-        for attempt in range(max_retries):
+            # add all the embeddings to the list
+            all_embeddings.extend(chunk_embeddings)
 
-            try:
-                # Create a list to store the embeddings
-                all_embeddings = []
-
-                # Process each chunk
-                for chunk in tqdm(text_to_embed):
-                    # Embed the chunk using OpenAIEmbeddings
-                    chunk_embeddings = embeddings.embed_documents([chunk])
-                    # add all the embeddings to the list
-                    all_embeddings.extend(chunk_embeddings)
-                    #add a small time delay
-                    time.sleep(2)
-
-                return all_embeddings
-            except Exception as rate_error:
-                if isinstance(rate_error, openai.RateLimitError):
-                    if attempt == max_retries - 1:
-                        logger.error(f"Rate limit exhausted after {max_retries} retries: {rate_error}")
-                        raise rate_error
-                    delay = base_delay * (2 ** attempt)
-                    print(f"Rate limit reached. Retrying in {delay} seconds...")
-                    time.sleep(delay)
-
+            logger.info(f"Embedding generated for text {index}/{len(text_to_embed)}")
+            
+        logger.info("Embeddings generation completed.")
+        return all_embeddings  # Return the list of all embeddings
+    
     except Exception as e:
+        # Log the error and retry
         logger.error(f"Error while creating embeddings: {e}")
         return None
-
 
 def split_text_into_chunks(text):
     """Split text into chunks using RecursiveCharacterTextSplitter from langchain
@@ -309,19 +295,20 @@ def split_text_into_chunks(text):
         logger.error(f"Error while splitting text into multiple chunks: {e}")
         return None
     
-def upload_embeddings_to_pinecone(embeddings, data_filename):
-    """upload embeddings to the pinecone vector database
+def upload_embeddings_to_pinecone(chunks_lst, data_filename):
+    """Create embeddings for the list of texts and upload embeddings to the pinecone vector database
 
     Args:
-        embeddings (list): list of embeddings to be uploaded
-        namespace (str): namespace of the index
+        chunks_lst (list): list of embeddings to be uploaded
+        data_filename (str): name of the input file
 
     Raises:
-        HTTPException: Upload error when failed to upload
+        Exception: Raise exception when embeddings failed to upload
     """
     try:
+        
         index_name = PINECONE_INDEX #name of the index - pinecone
-        dimension_length = len(embeddings[0])  #get the dimensions to create the index
+        dimension_length = len(embedding_model.embed_documents(["GET EMBEDDING LENGTH"])[0])  #get the dimensions to create the index
         namespace = generate_unique_file_id()
         
         try:
@@ -346,29 +333,47 @@ def upload_embeddings_to_pinecone(embeddings, data_filename):
         
         # Get the index
         index = pc.Index(index_name)
+        #loop through all the chunks, create embeddings and upload them to the pinecone index
+        batch_size = 50 #set a small batch size to avoid openai and pinecone rate errors
 
-        # Upload embeddings to the index
-        index.upsert(vectors=[{"id": str(i), "values": embedding} for i, embedding in enumerate(embeddings)], namespace=namespace)
+        logger.info("Iterating though each batch of chunks for creating embeddings") 
+        for i in tqdm(range(0, len(chunks_lst), batch_size)):
+            batch = chunks_lst[i:i + batch_size]
+            
+            # Prepare metadata and embeddings for the batch
+            metadatas = [{'text': chunk} for chunk in batch]
+            ids = [str(x) for x in range(i, i + len(batch))]
+            
+            # Get embeddings for the batch
+            embeds = get_embeddings_from_openai(batch)
+
+            if embeds:
+                # Upsert into Pinecone index
+                index.upsert(vectors=list(zip(ids, np.array(embeds), metadatas)), namespace=namespace)
+                logger.info(f"Batch {i//batch_size + 1} upserted successfully.")
+            else:
+                raise ValueError("Failed to create embeddings, empty list returned")
 
         # wait for index to be initialized  
         while not pc.describe_index(index_name).status['ready']:  
             logger.info(f"Pinecone: Wait for the index to be initialized")
-            time.sleep(2) 
+            time.sleep(1) 
 
-        # logger.info(f"Index stats:  {index.describe_index_stats()}")
         logger.info(f"Embeddings uploaded successfully for object: {data_filename}")
-        return {"object_name": data_filename, "namespace": namespace, "success": True}
+        return {"object_name": data_filename, "namespace": namespace}
     except Exception as upload_error:
         logger.error(f"Error uploading embeddings to Pinecone: {upload_error}")
         raise upload_error
 
 def generate_unique_file_id():
-    """Function to generate unique file id
+    """Function to generate unique file id in the format filenum_xxxxxxxx
 
     Returns:
-        string: returns the hex code of the unique file identifier
+        string: returns the unique file identifier in the format filenum_xxxxxxxx
     """
-    return uuid.uuid4().hex
+    # Generate a UUID and take the first 8 characters of its hexadecimal representation
+    unique_id = uuid.uuid4().hex[:8]
+    return f"filenum_{unique_id}"
 
 def download_file_from_minio(data: OCRRequest):
     """Downloads a file from Minio based on the given bucket and file name
@@ -415,4 +420,4 @@ def download_file_from_minio(data: OCRRequest):
         return input_filepath
     except Exception as e:
         logger.error(f"Failed to fetch the file from the given bucket: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch the file from the given bucket: {e}")
+        raise
