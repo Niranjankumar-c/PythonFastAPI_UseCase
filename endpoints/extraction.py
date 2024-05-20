@@ -2,10 +2,7 @@ from pydantic import BaseModel, Field
 import openai
 from pinecone import Pinecone
 from langchain_openai import OpenAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
-from langchain.chains.question_answering import load_qa_chain
-from langchain.llms import OpenAI
-import os
+from openai import OpenAI
 import logging
 from config import EMBEDDING_MODEL_ID, OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX, OPENAI_MODEL_ID
 from fastapi import APIRouter
@@ -19,6 +16,7 @@ class OCRResponse(BaseModel):
 
 # Configure OpenAI api
 openai.api_key = OPENAI_API_KEY
+openai_client = OpenAI()
 
 # Initialize OpenAIEmbeddings
 embedding_model = OpenAIEmbeddings(model=EMBEDDING_MODEL_ID)
@@ -60,22 +58,23 @@ def extract_attributes(data: ExtractRequest):
 
         #generate embeddings for the query text
         logger.info("Generating embeddings for the query text and performing vector search.")
-        relevant_docs = perform_vector_search(pc_namespace, query_text)
+        relevant_docs = perform_similarity_search(pinecone_index, pc_namespace, query_text)
 
         # Generate response using LangChain's QA chain
         if relevant_docs:
-            response = generate_response_from_text(relevant_docs, query_text)
+            response = generate_response_from_chatapi(relevant_docs, query_text)
+            logger.info("Sucessfully generated response to the user query using OpenAI API.")
             return OCRResponse(message=response)
         else:
-            return OCRResponse(message="No relevant attributes found. Try again with another query")
+            return OCRResponse(message="An error occurred during response generation, coun't find any results matching your query. Try again with another query")
 
     except Exception as e:
         logger.error(f"Error occurred during attribute extraction. {e}")
         return OCRResponse(message=f"Error occurred during attribute extraction. {e}")
 
-def perform_vector_search(namespace, query_text):
+def perform_similarity_search(pc_index, pc_namespace, query_text):
     """
-    Performs vector search using PineconeVectorStore integration with LangChain.
+    Performs similarity search using PineconeVectorStore integration with LangChain.
 
     Args:
         namespace (str): Pinecone namespace.
@@ -86,21 +85,23 @@ def perform_vector_search(namespace, query_text):
     """
 
     try:
-        #pinecone vectorstore from index
-        pinecone_index_vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX, embedding=embedding_model, namespace=namespace)
-        
-        #perform vector search using pineconevectorstore integration with langchain
-        search_results = pinecone_index_vectorstore.similarity_search(query_text)
 
-        # Extract relevant parts of the file
-        relevant_texts = search_results[0].page_content
-        return relevant_texts
+        #create embeddings for the input query text
+        logger.info(f"Creating embeddings for the query text")
+        embed = embedding_model.embed_documents([query_text])
+        logger.info(f"Peform similarity search on the index")
+        res = pc_index.query(vector=embed, top_k=3, include_metadata=True, namespace=pc_namespace)
+
+        #get the context
+        contexts = res['matches'][0]['metadata']['text'] if res['matches'][0]['metadata']['text'] else ""
+
+        return contexts
 
     except Exception as e:
         logger.error(f"An error occurred during vector search: {str(e)}")
         return None
 
-def generate_response_from_text(relevant_texts, query_text):
+def generate_response_from_chatapi(relevant_texts, query_text):
     """
     Generates response using LangChain's QA chain.
 
@@ -113,13 +114,24 @@ def generate_response_from_text(relevant_texts, query_text):
     """
 
     try:
-        llm = OpenAI(model_name=OPENAI_MODEL_ID)
-        qa_chain = load_qa_chain(llm, chain_type="map_reduce")
 
-        response = qa_chain.run(input_documents=relevant_texts, question=query_text)
-        extracted_attributes = response['answer']
-        logger.info(f"Extracted attributes: {extracted_attributes}")
-        return extracted_attributes
+        #create a prompt template 
+        messages = [
+            {"role": "system", "content": """You are a helpful assistant. You are required to answer the user query question in form of bullet points based on the provided context. The answer should be in English unless specified in the query. 
+            You shall not stray away from the context and only provide information which is derived from the context. Refer to the block of given text below: \n""" + relevant_texts},
+            {"role": "user", "content": "Question: " + query_text}]
+
+        result = openai_client.chat.completions.create(
+            model=OPENAI_MODEL_ID,
+            messages=messages,
+            temperature=0.3,
+            frequency_penalty=0,
+            presence_penalty=0,
+            stop=None
+        )
+        
+        model_response = result.choices[0].message.content
+        return model_response
     except Exception as e:
         logger.error(f"An error occurred during response generation: {str(e)}")
         return None
