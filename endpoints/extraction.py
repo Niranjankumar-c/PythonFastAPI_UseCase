@@ -53,13 +53,10 @@ def extract_attributes(data: ExtractRequest):
         # Validate Pinecone index existence
         logger.info("Validating the Pinecone index existence.")
         pinecone_index = validate_pinecone_index()
-        pinecone_index.list
 
         #validate the Pinecone namespace
-        logger.info("Validating the given namespace presence in the Pinecone index.")
-        if pc_namespace not in pinecone_index.list_indexes():
-            logger.error(f"Pinecone namespace '{pc_namespace}' does not exist in the '{PINECONE_INDEX}' index.")
-            raise ValueError(f"Pinecone namespace '{pc_namespace}' does not exist in the '{PINECONE_INDEX}' index.")
+        logger.info("Validating the given namespace exists in the Pinecone index.")
+        validate_pinecone_namespace(pinecone_index, pc_namespace)
 
         #generate embeddings for the query text
         logger.info("Generating embeddings for the query text and performing vector search.")
@@ -90,13 +87,13 @@ def perform_vector_search(namespace, query_text):
 
     try:
         #pinecone vectorstore from index
-        pinecone_index_vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX, embedding_model=embedding_model)
+        pinecone_index_vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX, embedding=embedding_model, namespace=namespace)
         
         #perform vector search using pineconevectorstore integration with langchain
-        search_results = pinecone_index_vectorstore.similarity_search(query_text, namespace=namespace, k=5)
+        search_results = pinecone_index_vectorstore.similarity_search(query_text)
 
         # Extract relevant parts of the file
-        relevant_texts = [result['metadata']['text'] for result in search_results]
+        relevant_texts = search_results[0].page_content
         return relevant_texts
 
     except Exception as e:
@@ -145,3 +142,23 @@ def validate_pinecone_index():
         logger.info(f"Pinecone index '{PINECONE_INDEX}' is present in the DB.")
         pinecone_index = pc.Index(PINECONE_INDEX)
         return pinecone_index
+
+def validate_pinecone_namespace(pinecone_index, namespace):
+    """
+    Checks if the Pinecone namespace is present within the specified index.
+
+    Args:
+        pinecone_index: Pinecone index object.
+        pc_namespace (str): Pinecone namespace.
+
+    Raises:
+        ValueError: If the namespace does not exist in the index.
+    """
+    index_stats = pinecone_index.describe_index_stats()
+    namespaces = index_stats.get("namespaces", {})
+
+    if namespace not in namespaces:
+        logger.error(f"Pinecone namespace '{namespace}' does not exist in the '{PINECONE_INDEX}' index.")
+        raise ValueError(f"Pinecone namespace '{namespace}' does not exist in the '{PINECONE_INDEX}' index.")
+    else:
+        logger.info(f"Pinecone namespace '{namespace}' exists in the '{PINECONE_INDEX}' index.")
